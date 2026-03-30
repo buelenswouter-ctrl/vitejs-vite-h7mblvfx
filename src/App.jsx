@@ -1,16 +1,17 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { initializeApp } from 'firebase/app';
 import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from 'firebase/auth';
-import { getFirestore, collection, doc, setDoc, onSnapshot, deleteDoc, query, where, getDocs } from 'firebase/firestore';
+import { getFirestore, collection, doc, setDoc, updateDoc, onSnapshot, deleteDoc, query, where, getDocs } from 'firebase/firestore';
 import { 
   BookOpen, Upload, Tag, Search, ChevronRight, Layers, Highlighter, 
   FileText, X, Plus, Sparkles, Wand2, FileSearch, Loader2, MessageSquare, 
   Send, Lightbulb, GraduationCap, Copy, Image as ImageIcon, Activity, 
-  CheckCircle, LifeBuoy, Calendar, Shuffle, Edit, MessageCircle, Brain, UserSearch, AlignLeft, Trash2
+  CheckCircle, LifeBuoy, Calendar, Shuffle, Edit, MessageCircle, Brain, UserSearch, AlignLeft, Trash2, Edit2, Network, Book, Filter
 } from 'lucide-react';
 
 const apiKey = "AIzaSyCmWnLM86w8OytutNEFiab5t3W0Mdl90uc";
 
+// Firebase initialisatie
 const firebaseConfig = {
   apiKey: "AIzaSyCKyyha9T3bux16l8bGebTsoN7har6ztDE",
   authDomain: "wijze-lessen-researcher.firebaseapp.com",
@@ -20,10 +21,11 @@ const firebaseConfig = {
   appId: "1:233907100124:web:ec621d4f35faee05b59719",
   measurementId: "G-8KN100WKKF"
 };
+
 const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
 const db = getFirestore(app);
-const appId = "wijze-lessen-researcher"; // Gebruik hier je Project ID
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
 
 // De 12 bouwstenen met iconen
 const BOUWSTENEN = [
@@ -57,8 +59,7 @@ const callGemini = async (prompt, systemPrompt = "", isJson = false) => {
         body.generationConfig = { responseMimeType: "application/json" };
       }
 
-      // Modelnaam aangepast naar stabiele gemini-1.5-flash
-      const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`, {
+      const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body)
@@ -76,11 +77,12 @@ const callGemini = async (prompt, systemPrompt = "", isJson = false) => {
 };
 
 /* --- COMPONENT: CHAT PANEEL --- */
-const ChatPanel = ({ selectedDoc }) => {
+const ChatPanel = ({ selectedDoc, highlights }) => {
   const [chatHistory, setChatHistory] = useState([]);
   const [chatInput, setChatInput] = useState("");
-  const [chatRole, setChatRole] = useState("coach"); 
+  const [chatRole, setChatRole] = useState("synthese"); 
   const [isChatting, setIsChatting] = useState(false);
+  const [popupInfo, setPopupInfo] = useState(null); // Nieuwe state voor de bron-popup
   const chatEndRef = useRef(null);
 
   useEffect(() => {
@@ -89,7 +91,7 @@ const ChatPanel = ({ selectedDoc }) => {
 
   const switchRole = (role) => {
     setChatRole(role);
-    setChatHistory([]); // Wis chatgeschiedenis bij rolwissel
+    setChatHistory([]); 
   };
 
   const handleChat = async (e) => {
@@ -101,15 +103,19 @@ const ChatPanel = ({ selectedDoc }) => {
     setChatHistory(prev => [...prev, { role: 'user', text: userMessage }]);
     setIsChatting(true);
 
-    const context = `Document titel: ${selectedDoc.title}\nInhoud: ${selectedDoc.content.substring(0, 8000)}`;
-    const prompt = `Context:\n${context}\n\nVraag: ${userMessage}`;
-    
+    let context = "";
     let systemPrompt = "";
-    if (chatRole === "coach") {
-      systemPrompt = "Je bent een didactisch coach gebaseerd op de 'Wijze Lessen' van Thomas More. Beantwoord vragen over hoe de tekst vertaald kan worden naar de lespraktijk. Wees praktisch, bemoedigend en link naar de 12 bouwstenen. Antwoord in het Nederlands.";
+
+    if (chatRole === "synthese") {
+      const highlightsText = highlights.map(h => `- ID: ${h.id} | Tag(s): [${h.tag || 'geen'}] | Citaat: "${h.text}" | (Uit document: ${h.docTitle})`).join('\n');
+      context = `Huidig document ter referentie: ${selectedDoc.title}\n\nAlle opgeslagen annotaties en citaten van de docent uit alle artikelen:\n${highlightsText}`;
+      systemPrompt = "Je bent een academische synthese-assistent. Je helpt de gebruiker om bevindingen van verschillende geüploade artikelen met elkaar te verbinden. Gebruik de verstrekte annotaties (met hun tags). Verzin geen theorieën. Antwoord in het Nederlands.\nBELANGRIJK: Verwijs ALTIJD naar je bronnen door de exacte ID van de annotatie in de tekst te verwerken, in exact dit formaat: [ID: de-id-van-het-citaat]. Gebruik dit overal waar je een citaat of stelling baseert op de annotaties.";
     } else {
-      systemPrompt = "Je bent een uiterst strikte en kritische onderwijsonderzoeker. Beantwoord de vraag UITSLUITEND en ALLEEN op basis van de letterlijke tekst die in de context is meegeleverd. Verzin GEEN informatie en gebruik GEEN externe kennis. Als het antwoord niet in de tekst te vinden is, zeg dan expliciet: 'Deze informatie wordt niet in de geselecteerde tekst vermeld.'";
+      context = `Document titel: ${selectedDoc.title}\nInhoud: ${selectedDoc.content.substring(0, 8000)}`;
+      systemPrompt = "Je bent een uiterst strikte en kritische onderwijsonderzoeker. Beantwoord de vraag UITSLUITEND en ALLEEN op basis van de letterlijke tekst die in de context is meegeleverd. Verzin GEEN informatie en gebruik GEEN externe kennis. Als het antwoord niet in de tekst te vinden is, zeg dat dan.\nBELANGRIJK: Verwijs ALTIJD naar de exacte zin(nen) uit de tekst waarop je je antwoord baseert. Plaats dit citaat altijd in de tekst in exact dit formaat: [Citaat: \"de letterlijke zin uit de tekst hier\"].";
     }
+
+    const prompt = `Context:\n${context}\n\nVraag van gebruiker: ${userMessage}`;
 
     try {
       const response = await callGemini(prompt, systemPrompt);
@@ -121,14 +127,44 @@ const ChatPanel = ({ selectedDoc }) => {
     }
   };
 
+  // Functie om de tekst met [ID: ...] of [Citaat: "..."] om te zetten in klikbare knoppen
+  const renderMessageText = (text) => {
+    const regex = /\[ID:\s*(.*?)\]|\[Citaat:\s*"(.*?)"\]/g;
+    const parts = [];
+    let lastIndex = 0;
+    let match;
+
+    while ((match = regex.exec(text)) !== null) {
+      parts.push(text.substring(lastIndex, match.index));
+      if (match[1]) {
+        const id = match[1].trim();
+        parts.push(
+          <button key={match.index} onClick={() => setPopupInfo({ type: 'id', id })} className="inline-flex items-center gap-1 text-[10px] bg-[#F37021]/10 text-[#F37021] px-1.5 py-0.5 rounded hover:bg-[#F37021]/20 font-black tracking-wider uppercase mx-1 border border-[#F37021]/30 align-middle shadow-sm transition">
+            <FileSearch size={10} /> Toon Bron
+          </button>
+        );
+      } else if (match[2]) {
+        const citaat = match[2];
+        parts.push(
+          <button key={match.index} onClick={() => setPopupInfo({ type: 'citaat', text: citaat })} className="inline-flex items-center gap-1 text-[10px] bg-[#003B5C]/10 text-[#003B5C] px-1.5 py-0.5 rounded hover:bg-[#003B5C]/20 font-black tracking-wider uppercase mx-1 border border-[#003B5C]/30 align-middle shadow-sm transition">
+            <FileSearch size={10} /> Toon Context
+          </button>
+        );
+      }
+      lastIndex = regex.lastIndex;
+    }
+    parts.push(text.substring(lastIndex));
+    return parts;
+  };
+
   return (
-    <div className="flex-1 flex flex-col overflow-hidden bg-white">
+    <div className="flex-1 flex flex-col overflow-hidden bg-white relative">
       <div className="flex p-3 bg-slate-50 gap-2 border-b border-slate-100">
         <button 
-          onClick={() => switchRole('coach')}
-          className={`flex-1 py-2 text-[10px] font-black uppercase tracking-wider rounded-lg flex items-center justify-center gap-1.5 transition-all duration-300 ${chatRole === 'coach' ? 'bg-[#F37021] text-white shadow-md transform scale-[1.02]' : 'bg-white text-slate-500 border border-slate-200 hover:bg-slate-100'}`}
+          onClick={() => switchRole('synthese')}
+          className={`flex-1 py-2 text-[10px] font-black uppercase tracking-wider rounded-lg flex items-center justify-center gap-1.5 transition-all duration-300 ${chatRole === 'synthese' ? 'bg-[#F37021] text-white shadow-md transform scale-[1.02]' : 'bg-white text-slate-500 border border-slate-200 hover:bg-slate-100'}`}
         >
-          <Lightbulb size={14} /> Didactische Coach
+          <Network size={14} /> Synthese Assistent
         </button>
         <button 
           onClick={() => switchRole('researcher')}
@@ -138,30 +174,58 @@ const ChatPanel = ({ selectedDoc }) => {
         </button>
       </div>
 
-      <div className="flex-1 overflow-y-auto p-5 space-y-5 bg-slate-50/50 custom-scrollbar">
+      <div className="flex-1 overflow-y-auto p-5 space-y-5 bg-slate-50/50 custom-scrollbar relative">
+        {/* De bron-popup over de chat heen */}
+        {popupInfo && (
+          <div className="absolute inset-0 bg-slate-900/30 backdrop-blur-[1px] z-50 flex items-center justify-center p-4 animate-in fade-in duration-200">
+            <div className="bg-white rounded-xl shadow-2xl p-5 w-full border border-slate-200 animate-in zoom-in-95">
+              <div className="flex justify-between items-start mb-3 border-b border-slate-100 pb-2">
+                <h4 className="font-bold text-[#003B5C] flex items-center gap-2 text-sm"><FileSearch size={16} className="text-[#F37021]"/> Locatie in tekst</h4>
+                <button onClick={() => setPopupInfo(null)} className="text-slate-400 hover:text-slate-700 transition"><X size={16}/></button>
+              </div>
+              
+              {popupInfo.type === 'id' ? (() => {
+                const h = highlights.find(h => h.id === popupInfo.id);
+                return h ? (
+                  <div>
+                    <p className="text-[10px] font-black uppercase text-slate-400 mb-1">Uit document: {h.docTitle}</p>
+                    <p className="text-sm italic text-slate-700 bg-slate-50 p-3 rounded-lg border-l-2 border-[#F37021] leading-relaxed">"{h.text}"</p>
+                    {h.comment && <p className="text-xs mt-2 text-[#003B5C] font-medium border-t border-slate-100 pt-2">👤 Jouw notitie: {h.comment}</p>}
+                  </div>
+                ) : <p className="text-sm text-slate-500 italic">Oorspronkelijke bron niet meer gevonden.</p>;
+              })() : (
+                <div>
+                  <p className="text-[10px] font-black uppercase text-slate-400 mb-1">Citaat uit document:</p>
+                  <p className="text-sm italic text-slate-700 bg-slate-50 p-3 rounded-lg border-l-2 border-[#003B5C] leading-relaxed">"{popupInfo.text}"</p>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
         {chatHistory.length === 0 ? (
           <div className="h-full flex flex-col items-center justify-center text-center px-4 animate-in fade-in zoom-in duration-300">
-            <div className={`p-4 rounded-full mb-3 shadow-inner ${chatRole === 'coach' ? 'bg-[#F37021]/10 text-[#F37021]' : 'bg-[#003B5C]/10 text-[#003B5C]'}`}>
-              {chatRole === 'coach' ? <Lightbulb size={32} /> : <UserSearch size={32} />}
+            <div className={`p-4 rounded-full mb-3 shadow-inner ${chatRole === 'synthese' ? 'bg-[#F37021]/10 text-[#F37021]' : 'bg-[#003B5C]/10 text-[#003B5C]'}`}>
+              {chatRole === 'synthese' ? <Network size={32} /> : <UserSearch size={32} />}
             </div>
             <p className="text-xs font-bold text-slate-700 mb-1">
-              {chatRole === 'coach' ? 'Coach Modus Actief' : 'Onderzoeker Modus Actief'}
+              {chatRole === 'synthese' ? 'Synthese Assistent Actief' : 'Onderzoeker Modus Actief'}
             </p>
             <p className="text-xs font-medium text-slate-500 max-w-[200px]">
-              {chatRole === 'coach' 
-                ? "Ik help je deze theorie te vertalen naar je eigen lespraktijk." 
+              {chatRole === 'synthese' 
+                ? "Ik schrijf rapporten en leg dwarsverbanden tussen al je annotaties en artikelen." 
                 : "Ik beantwoord vragen strikt en alleen op basis van de tekst hiernaast."}
             </p>
           </div>
         ) : (
           chatHistory.map((msg, i) => (
             <div key={i} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-              <div className={`max-w-[85%] p-3.5 rounded-2xl text-xs leading-relaxed ${
+              <div className={`max-w-[85%] p-3.5 rounded-2xl text-xs leading-relaxed whitespace-pre-wrap ${
                 msg.role === 'user' 
                   ? 'bg-[#003B5C] text-white rounded-tr-none shadow-md' 
                   : `bg-white border border-slate-200 text-slate-800 rounded-tl-none shadow-sm ${chatRole === 'researcher' ? 'border-l-4 border-l-[#003B5C]' : 'border-l-4 border-l-[#F37021]'}`
               }`}>
-                {msg.text}
+                {msg.role === 'user' ? msg.text : renderMessageText(msg.text)}
               </div>
             </div>
           ))
@@ -180,7 +244,7 @@ const ChatPanel = ({ selectedDoc }) => {
         <form onSubmit={handleChat} className="relative">
           <input 
             type="text" 
-            placeholder={chatRole === 'coach' ? "Vraag advies voor je les..." : "Vraag over de studie..."}
+            placeholder={chatRole === 'synthese' ? "Bijv: Schrijf een rapport over de tag 'retrieval'..." : "Vraag over de studie..."}
             value={chatInput}
             onChange={(e) => setChatInput(e.target.value)}
             className="w-full pl-4 pr-12 py-3 bg-slate-50 border border-slate-200 rounded-xl text-xs focus:ring-2 focus:ring-[#F37021] outline-none transition font-medium"
@@ -188,7 +252,7 @@ const ChatPanel = ({ selectedDoc }) => {
           <button 
             type="submit"
             disabled={!chatInput.trim() || isChatting}
-            className={`absolute right-2 top-1/2 -translate-y-1/2 p-2 text-white rounded-lg transition disabled:opacity-50 shadow-sm ${chatRole === 'coach' ? 'bg-[#F37021] hover:bg-[#d9611a]' : 'bg-[#003B5C] hover:bg-[#002b44]'}`}
+            className={`absolute right-2 top-1/2 -translate-y-1/2 p-2 text-white rounded-lg transition disabled:opacity-50 shadow-sm ${chatRole === 'synthese' ? 'bg-[#F37021] hover:bg-[#d9611a]' : 'bg-[#003B5C] hover:bg-[#002b44]'}`}
           >
             <Send size={14} />
           </button>
@@ -204,11 +268,12 @@ const AnnotationPanel = ({ user, selectedDoc, pendingSelection, setPendingSelect
   const [newCommentInput, setNewCommentInput] = useState("");
   const [isSuggestingTag, setIsSuggestingTag] = useState(false);
 
-  // Verzamel unieke tags voor de suggestielijst
   const uniqueTags = useMemo(() => {
     const tags = new Set();
     highlights.forEach(h => {
-      if (h.tag) tags.add(h.tag.toLowerCase().trim());
+      if (h.tag) {
+        h.tag.split(',').forEach(t => tags.add(t.trim().toLowerCase()));
+      }
     });
     return Array.from(tags).filter(Boolean);
   }, [highlights]);
@@ -217,8 +282,8 @@ const AnnotationPanel = ({ user, selectedDoc, pendingSelection, setPendingSelect
     if (!pendingSelection) return;
     setIsSuggestingTag(true);
     try {
-      const prompt = `Welke tag (maximaal 2 woorden) past het beste bij dit stuk tekst in de context van onderwijs?\nTekst: "${pendingSelection.text}"`;
-      const tag = await callGemini(prompt, "Geef alleen de tag terug in kleine letters.");
+      const prompt = `Welke tag of tags (maximaal 2 woorden per tag, gescheiden door een komma) passen het beste bij dit stuk tekst in de context van onderwijs?\nTekst: "${pendingSelection.text}"`;
+      const tag = await callGemini(prompt, "Geef alleen de tag(s) terug in kleine letters.");
       setNewTagInput(tag.trim().toLowerCase());
     } catch (error) {
       console.error(error);
@@ -235,7 +300,7 @@ const AnnotationPanel = ({ user, selectedDoc, pendingSelection, setPendingSelect
       docId: selectedDoc.id,
       docTitle: selectedDoc.title,
       text: pendingSelection.text,
-      occurrenceIndex: pendingSelection.occurrenceIndex, // Voeg de index toe voor exacte selectie
+      occurrenceIndex: pendingSelection.occurrenceIndex,
       tag: newTagInput || "algemeen",
       comment: newCommentInput || "",
       timestamp: Date.now()
@@ -248,7 +313,7 @@ const AnnotationPanel = ({ user, selectedDoc, pendingSelection, setPendingSelect
   };
 
   const deleteAnnotation = async (id, e) => {
-    e.stopPropagation(); // Voorkom dat er tegelijkertijd op de highlight wordt geklikt
+    e.stopPropagation(); 
     if (!user) return;
     await deleteDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'highlights', id));
   };
@@ -268,12 +333,11 @@ const AnnotationPanel = ({ user, selectedDoc, pendingSelection, setPendingSelect
                 <input 
                   type="text" 
                   list="tag-suggestions"
-                  placeholder="Tag (bijv. retrieval)"
+                  placeholder="Tags (bijv. retrieval, feedback)"
                   value={newTagInput}
                   onChange={(e) => setNewTagInput(e.target.value)}
                   className="flex-1 text-xs border border-slate-200 rounded-lg px-3 py-2 outline-none focus:border-[#F37021]"
                 />
-                {/* Datalist met eerdere tags voor autocomplete suggesties */}
                 <datalist id="tag-suggestions">
                   {uniqueTags.map((tag, idx) => (
                     <option key={idx} value={tag} />
@@ -308,7 +372,6 @@ const AnnotationPanel = ({ user, selectedDoc, pendingSelection, setPendingSelect
            </div>
         )}
 
-        {/* Opgeslagen Annotaties Lijst */}
         <div className="space-y-3">
           {docHighlights.length > 0 && <h4 className="text-[11px] font-black text-[#003B5C] uppercase tracking-[0.1em] mb-2">Jouw Annotaties</h4>}
           {docHighlights.map(h => (
@@ -323,8 +386,12 @@ const AnnotationPanel = ({ user, selectedDoc, pendingSelection, setPendingSelect
               >
                 <X size={14}/>
               </button>
-              <span className="bg-[#003B5C]/10 text-[#003B5C] font-bold px-2 py-0.5 rounded text-[10px] uppercase">{h.tag}</span>
-              <p className="italic text-slate-600 mt-2 mb-2 line-clamp-3">"{h.text}"</p>
+              <div className="flex gap-1 flex-wrap mb-2">
+                {(h.tag || 'algemeen').split(',').map((t, idx) => (
+                  <span key={idx} className="bg-[#003B5C]/10 text-[#003B5C] font-bold px-2 py-0.5 rounded text-[10px] uppercase">{t.trim()}</span>
+                ))}
+              </div>
+              <p className="italic text-slate-600 mb-2 line-clamp-3">"{h.text}"</p>
               {h.comment && <p className="font-medium text-[#003B5C] border-t border-slate-100 pt-2 mt-2">👤 {h.comment}</p>}
             </div>
           ))}
@@ -347,17 +414,23 @@ export default function App() {
   const [isSummarizing, setIsSummarizing] = useState(false);
   const [isSynthesizing, setIsSynthesizing] = useState(false);
   
+  // DOI State
+  const [doiInput, setDoiInput] = useState("");
+  const [isAddingDoi, setIsAddingDoi] = useState(false);
+  
   const [showPasteModal, setShowPasteModal] = useState(false);
   const [pasteTitle, setPasteTitle] = useState("");
   const [pasteContent, setPasteContent] = useState("");
+
+  const [showEditCategoriesModal, setShowEditCategoriesModal] = useState(false);
+  const [editingDoc, setEditingDoc] = useState(null);
+  const [selectedCategories, setSelectedCategories] = useState([]);
 
   const [searchTag, setSearchTag] = useState("");
   const [activeSummary, setActiveSummary] = useState(null);
   const [activeSynthesis, setActiveSynthesis] = useState(null);
   
-  // Aangepast naar object state om zowel tekst als index bij te houden
   const [pendingSelection, setPendingSelection] = useState(null);
-  
   const [rightPanelTab, setRightPanelTab] = useState('annotations'); 
   const [activeHighlightId, setActiveHighlightId] = useState(null);
 
@@ -396,10 +469,14 @@ export default function App() {
       const d = [];
       snap.forEach(doc => d.push({ id: doc.id, ...doc.data() }));
       setDocuments(d);
-      if (selectedDoc) {
-        const updated = d.find(doc => doc.id === selectedDoc.id);
-        if (updated) setSelectedDoc(updated);
-      }
+      
+      setSelectedDoc(prev => {
+        if (prev) {
+          const updated = d.find(doc => doc.id === prev.id);
+          return updated ? updated : prev;
+        }
+        return null;
+      });
     }, console.error);
 
     const highlightsRef = collection(db, 'artifacts', appId, 'users', user.uid, 'highlights');
@@ -411,6 +488,20 @@ export default function App() {
 
     return () => { unsubDocs(); unsubHighlights(); };
   }, [user]);
+
+  // SCROLL LOGICA - Toegevoegd om exact en betrouwbaar te scrollen naar het document
+  useEffect(() => {
+    if (view === 'reader' && activeHighlightId) {
+      // Gebruik een timeout om React de tijd te geven de grote tekst en spans te renderen
+      const timer = setTimeout(() => {
+        const el = document.getElementById(`highlight-${activeHighlightId}`);
+        if (el) {
+          el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }
+      }, 400);
+      return () => clearTimeout(timer);
+    }
+  }, [view, activeHighlightId, selectedDoc, highlights]);
 
   const classifyDocument = async (title, content) => {
     setIsAnalyzing(true);
@@ -438,10 +529,15 @@ export default function App() {
     const categoryIds = await classifyDocument(title, content);
     const docId = crypto.randomUUID();
     
+    // Genereer een automatische APA7 voor lokale bestanden
+    const year = new Date().getFullYear();
+    const autoApa7 = `Onbekende Auteur. (${year}). *${title}* [Lokaal document]. Geüpload bestand.`;
+    
     await setDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'documents', docId), {
       title,
       content,
       categoryIds,
+      apa7: autoApa7,
       date: new Date().toLocaleDateString()
     });
     
@@ -484,12 +580,56 @@ export default function App() {
     }
   };
 
+  const handleAddDoi = async () => {
+    if (!doiInput.trim() || !user) return;
+    setIsAddingDoi(true);
+    let cleanDoi = doiInput.trim().replace(/^(https?:\/\/)?(dx\.)?doi\.org\//i, '');
+    try {
+      const response = await fetch(`https://doi.org/${cleanDoi}`, {
+        headers: { 'Accept': 'text/x-bibliography; style=apa' }
+      });
+      if (!response.ok) throw new Error('DOI niet gevonden');
+      const apaText = await response.text();
+      
+      const docId = crypto.randomUUID();
+      // Automatische initiële toekenning van Bouwsteen 1 (aangezien er geen tekst is)
+      await setDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'documents', docId), {
+        title: `DOI: ${cleanDoi}`,
+        content: "Bron toegevoegd via DOI. Bekijk de originele publicatie voor de volledige tekst.",
+        categoryIds: [1], 
+        apa7: apaText.trim(),
+        date: new Date().toLocaleDateString()
+      });
+      setDoiInput("");
+    } catch (error) {
+      alert("Kon de DOI niet ophalen. Controleer of deze correct is.");
+    } finally {
+      setIsAddingDoi(false);
+    }
+  };
+
   const handleDeleteDoc = async (docId, e) => {
     e.stopPropagation();
     if (window.confirm("Weet je zeker dat je dit document wilt verwijderen? Annotaties gaan ook verloren.")) {
       if (!user) return;
       await deleteDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'documents', docId));
     }
+  };
+
+  const handleEditDocCategories = (docItem, e) => {
+    if(e) e.stopPropagation();
+    setEditingDoc(docItem);
+    setSelectedCategories(docItem.categoryIds || []);
+    setShowEditCategoriesModal(true);
+  };
+
+  const saveEditedCategories = async () => {
+    if (!user || !editingDoc) return;
+    await updateDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'documents', editingDoc.id), {
+      categoryIds: selectedCategories
+    });
+    setShowEditCategoriesModal(false);
+    setEditingDoc(null);
   };
 
   const generateSummary = async () => {
@@ -509,7 +649,7 @@ export default function App() {
   const synthesizeHighlights = async () => {
     if (filteredHighlights.length < 2) return;
     setIsSynthesizing(true);
-    const prompt = `Synthetiseer de volgende fragmenten die door een docent zijn getagd met "${searchTag}". Maak er een samenhangend betoog of overzicht van.\nFragmenten:\n${filteredHighlights.map(h => `- ${h.text} (Opmerking docent: ${h.comment || 'geen'})`).join('\n')}`;
+    const prompt = `Synthetiseer de volgende fragmenten die door een docent zijn getagd met (of gerelateerd aan) "${searchTag}". Maak er een samenhangend betoog of overzicht van.\nFragmenten:\n${filteredHighlights.map(h => `- ${h.text} (Opmerking docent: ${h.comment || 'geen'})`).join('\n')}`;
     try {
       const synthesis = await callGemini(prompt, "Schrijf een academische synthese in het Nederlands.");
       setActiveSynthesis(synthesis);
@@ -520,7 +660,6 @@ export default function App() {
     }
   };
 
-  // Functie voor slimme, exacte tekstselectie
   const handleTextSelection = useCallback(() => {
     const selection = window.getSelection();
     if (selection.rangeCount === 0) return;
@@ -532,7 +671,6 @@ export default function App() {
       
       if (!container || !container.contains(range.commonAncestorContainer)) return;
 
-      // Bereken de exacte locatie/index van de selectie zodat we alléén deze markeren
       const preSelectionRange = range.cloneRange();
       preSelectionRange.selectNodeContents(container);
       preSelectionRange.setEnd(range.startContainer, range.startOffset);
@@ -550,21 +688,13 @@ export default function App() {
     }
   }, [pendingSelection]);
 
-  useEffect(() => {
-    if (activeHighlightId) {
-      const el = document.getElementById(`highlight-${activeHighlightId}`);
-      if (el) {
-        el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-      }
-    }
-  }, [activeHighlightId]);
-
   const filteredHighlights = useMemo(() => {
     if (!searchTag) return highlights;
-    return highlights.filter(h => h.tag.toLowerCase().includes(searchTag.toLowerCase()));
+    return highlights.filter(h => 
+      (h.tag || '').split(',').some(t => t.trim().toLowerCase().includes(searchTag.toLowerCase()))
+    );
   }, [highlights, searchTag]);
 
-  // Aangepaste render-functie die index/locatie gebruikt voor exacte markering
   const renderHighlightedText = (text, docHighlights, activeId) => {
     if (!text) return null;
     if (!docHighlights || docHighlights.length === 0) return text;
@@ -586,7 +716,6 @@ export default function App() {
         searchPos = text.indexOf(searchStr, searchPos + searchStr.length);
       }
 
-      // Fallback als de exacte index niet klopt
       if (pos === -1) pos = text.indexOf(searchStr);
 
       return pos !== -1 ? { ...h, startIndex: pos, endIndex: pos + searchStr.length } : null;
@@ -614,7 +743,7 @@ export default function App() {
           id={`highlight-${part.id}`}
           onClick={() => { setActiveHighlightId(part.id); setRightPanelTab('annotations'); }}
           className={`px-1 rounded cursor-pointer transition-all duration-300 ${activeId === part.id ? 'bg-yellow-400 shadow-md ring-2 ring-[#F37021] text-slate-900 font-medium' : 'bg-yellow-200/60 hover:bg-yellow-300 text-inherit'}`}
-          title={`Tag: ${part.tag}`}
+          title={`Tag(s): ${part.tag || 'geen'}`}
         >
           {part.text}
         </mark>
@@ -652,6 +781,51 @@ export default function App() {
         </div>
       )}
 
+      {/* Categorieen Modal - Nu overal herbruikbaar */}
+      {showEditCategoriesModal && (
+        <div className="fixed inset-0 bg-[#003B5C]/50 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl p-6">
+            <h3 className="text-xl font-bold text-[#003B5C] mb-2">Bouwstenen Beheren</h3>
+            <p className="text-sm text-slate-500 mb-6">Selecteer bij welke bouwstenen <span className="font-bold">"{editingDoc?.title}"</span> hoort. Je kunt er meerdere selecteren.</p>
+            
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mb-6 max-h-[50vh] overflow-y-auto custom-scrollbar p-2">
+              {BOUWSTENEN.map(b => (
+                <label key={b.id} className="flex items-start gap-3 p-3 border rounded-xl cursor-pointer hover:bg-slate-50 transition">
+                  <input 
+                    type="checkbox" 
+                    className="mt-1"
+                    checked={selectedCategories.includes(b.id)}
+                    onChange={(e) => {
+                      if (e.target.checked) {
+                        setSelectedCategories(prev => [...prev, b.id]);
+                      } else {
+                        setSelectedCategories(prev => prev.filter(id => id !== b.id));
+                      }
+                    }}
+                  />
+                  <div>
+                    <div className="font-bold text-sm text-[#003B5C]">Bouwsteen {b.id}</div>
+                    <div className="text-xs text-slate-500 line-clamp-1">{b.title}</div>
+                  </div>
+                </label>
+              ))}
+            </div>
+
+            <div className="flex justify-end gap-3 pt-4 border-t border-slate-100">
+              <button onClick={() => { setShowEditCategoriesModal(false); setEditingDoc(null); }} className="px-4 py-2 text-slate-500 font-bold hover:bg-slate-100 rounded-lg">Annuleren</button>
+              <button 
+                onClick={saveEditedCategories}
+                disabled={selectedCategories.length === 0}
+                className="px-4 py-2 bg-[#F37021] text-white font-bold rounded-lg hover:bg-[#d9611a] disabled:opacity-50"
+              >
+                Wijzigingen Opslaan
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Paste Modal */}
       {showPasteModal && (
         <div className="fixed inset-0 bg-[#003B5C]/50 backdrop-blur-sm flex items-center justify-center z-50 p-4">
           <div className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl p-6">
@@ -704,11 +878,20 @@ export default function App() {
                   <div key={doc.id} className="group/item relative flex items-center">
                     <button 
                       onClick={() => { setSelectedDoc(doc); setView('reader'); setActiveSummary(null); setPendingSelection(null); setActiveHighlightId(null); }}
-                      className="w-full flex items-center gap-2 p-2 hover:bg-slate-50 rounded-lg text-left text-xs text-slate-700 transition pr-8"
+                      className="w-full flex items-center gap-2 p-2 hover:bg-slate-50 rounded-lg text-left text-xs text-slate-700 transition pr-14"
                     >
                       <FileText size={14} className="text-[#F37021] shrink-0" />
                       <span className="truncate font-semibold">{doc.title}</span>
                     </button>
+                    
+                    <button 
+                      onClick={(e) => handleEditDocCategories(doc, e)}
+                      className="absolute right-8 opacity-0 group-hover/item:opacity-100 text-slate-300 hover:text-[#003B5C] transition-opacity p-1 bg-white"
+                      title="Verplaats of voeg toe aan bouwstenen"
+                    >
+                      <Edit2 size={14} />
+                    </button>
+
                     <button 
                       onClick={(e) => handleDeleteDoc(doc.id, e)}
                       className="absolute right-2 opacity-0 group-hover/item:opacity-100 text-slate-300 hover:text-red-500 transition-opacity p-1 bg-white"
@@ -728,13 +911,192 @@ export default function App() {
     </div>
   );
 
+  /* --- COMPONENT: NIEUWE BIBLIOTHEEK WEERGAVE --- */
+  const BibliographyView = () => {
+    // State voor de filter
+    const [bibFilter, setBibFilter] = useState(null);
+
+    // Filter en sorteer de documenten
+    const filteredDocs = [...documents].filter(doc => bibFilter === null || (doc.categoryIds && doc.categoryIds.includes(bibFilter)));
+    const sortedDocs = filteredDocs.sort((a, b) => {
+      const strA = a.apa7 || a.title || "";
+      const strB = b.apa7 || b.title || "";
+      return strA.localeCompare(strB);
+    });
+
+    return (
+      <div className="p-8 lg:p-12 max-w-7xl mx-auto h-full overflow-y-auto custom-scrollbar">
+        <div className="mb-10">
+          <h2 className="text-3xl font-black text-[#003B5C]">Bibliotheek (APA7)</h2>
+          <p className="text-slate-500 mt-1">Al je bronnen alfabetisch gesorteerd. Filter of voeg nieuwe bronnen toe.</p>
+        </div>
+
+        <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-200 mb-6 max-w-2xl">
+          <h3 className="font-bold text-[#003B5C] mb-3 flex items-center gap-2">
+            <Book size={18} className="text-[#F37021]"/> Bron toevoegen via DOI
+          </h3>
+          <div className="flex gap-3">
+            <input 
+              type="text"
+              placeholder="Bijv. 10.1038/nphys1170"
+              value={doiInput}
+              onChange={e => setDoiInput(e.target.value)}
+              className="flex-1 border border-slate-200 rounded-lg px-4 py-2 outline-none focus:border-[#F37021] text-sm"
+            />
+            <button 
+              onClick={handleAddDoi}
+              disabled={!doiInput.trim() || isAddingDoi}
+              className="bg-[#003B5C] text-white px-6 py-2 rounded-lg font-bold text-sm hover:bg-[#002b44] transition shadow-md disabled:opacity-50 flex items-center gap-2"
+            >
+              {isAddingDoi ? <Loader2 size={16} className="animate-spin" /> : <Plus size={16} />}
+              Toevoegen
+            </button>
+          </div>
+        </div>
+
+        {/* Filter functionaliteit */}
+        <div className="mb-8">
+          <div className="flex items-center gap-2 mb-3">
+             <Filter size={16} className="text-slate-400" />
+             <span className="text-xs font-bold text-slate-500 uppercase tracking-wider">Filter op Bouwsteen:</span>
+          </div>
+          <div className="flex gap-2 overflow-x-auto pb-2 custom-scrollbar">
+             <button 
+               onClick={() => setBibFilter(null)}
+               className={`shrink-0 px-4 py-2 rounded-full text-xs font-bold transition-all border ${bibFilter === null ? 'bg-[#003B5C] text-white border-[#003B5C] shadow-md' : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'}`}
+             >
+               Toon Alles ({documents.length})
+             </button>
+             {BOUWSTENEN.map(b => (
+               <button 
+                 key={b.id}
+                 onClick={() => setBibFilter(b.id)}
+                 className={`shrink-0 px-4 py-2 rounded-full text-xs font-bold transition-all border flex items-center gap-1.5 ${bibFilter === b.id ? 'bg-[#F37021] text-white border-[#F37021] shadow-md' : 'bg-white text-slate-600 border-slate-200 hover:border-[#F37021]/40'}`}
+                 title={b.title}
+               >
+                 <span>B{b.id}</span>
+               </button>
+             ))}
+          </div>
+        </div>
+
+        <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
+          <div className="px-6 py-4 border-b border-slate-100 bg-slate-50 flex justify-between items-center">
+            <h3 className="font-bold text-[#003B5C] text-sm uppercase tracking-wider">
+              {bibFilter ? `Bronnenlijst (Bouwsteen ${bibFilter})` : 'Volledige Bronnenlijst'}
+            </h3>
+            <span className="text-xs font-bold text-slate-400 bg-slate-200 px-2.5 py-1 rounded-full">{sortedDocs.length} items</span>
+          </div>
+          <ul className="divide-y divide-slate-100">
+            {sortedDocs.length === 0 ? (
+              <li className="p-8 text-center text-slate-500 italic flex flex-col items-center justify-center">
+                <Search size={32} className="text-slate-300 mb-3" />
+                Geen bronnen gevonden voor deze filter.
+              </li>
+            ) : (
+              sortedDocs.map(doc => (
+                <li key={doc.id} className="p-6 flex flex-col md:flex-row md:items-start justify-between gap-6 hover:bg-slate-50 transition group">
+                  <div className="flex-1">
+                    {/* Render APA7 text with simulated italics by replacing *text* with <i>text</i> */}
+                    <p 
+                      className="text-slate-800 text-sm leading-relaxed pl-6 -indent-6 mb-4 font-serif"
+                      dangerouslySetInnerHTML={{ __html: (doc.apa7 || doc.title).replace(/\*(.*?)\*/g, '<i>$1</i>') }}
+                    />
+                    
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider">Bouwstenen:</span>
+                      {doc.categoryIds && doc.categoryIds.length > 0 ? (
+                        doc.categoryIds.map(id => {
+                          const bs = BOUWSTENEN.find(b => b.id === id);
+                          return bs ? (
+                            <span key={id} className="bg-[#003B5C]/10 text-[#003B5C] px-2.5 py-1 rounded text-[10px] font-bold uppercase border border-[#003B5C]/20">
+                              {id}. {bs.title}
+                            </span>
+                          ) : null;
+                        })
+                      ) : (
+                        <span className="text-[10px] text-slate-400 italic">Geen bouwstenen toegekend</span>
+                      )}
+                    </div>
+                  </div>
+                  
+                  <div className="shrink-0 flex gap-2">
+                    <button 
+                      onClick={() => handleEditDocCategories(doc)}
+                      className="text-[#F37021] hover:text-[#d9611a] hover:bg-[#F37021]/10 px-3 py-2 rounded-lg text-xs font-bold transition flex items-center gap-1 border border-transparent hover:border-[#F37021]/30"
+                    >
+                      <Edit2 size={14} /> Beheer Bouwstenen
+                    </button>
+                    {/* Option to also view the document if it's not just a DOI without text */}
+                    {doc.content && !doc.content.includes("Bron toegevoegd via DOI") && (
+                       <button 
+                         onClick={() => { setSelectedDoc(doc); setView('reader'); }}
+                         className="text-[#003B5C] hover:text-[#002b44] hover:bg-[#003B5C]/10 px-3 py-2 rounded-lg text-xs font-bold transition flex items-center gap-1 border border-transparent hover:border-[#003B5C]/30"
+                       >
+                         <FileText size={14} /> Lees Document
+                       </button>
+                    )}
+                  </div>
+                </li>
+              ))
+            )}
+          </ul>
+        </div>
+        
+        {/* Weergave van de gedeelde Modal als hij hier opgeroepen wordt */}
+        {showEditCategoriesModal && (
+          <div className="fixed inset-0 bg-[#003B5C]/50 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+            <div className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl p-6">
+              <h3 className="text-xl font-bold text-[#003B5C] mb-2">Bouwstenen Beheren</h3>
+              <p className="text-sm text-slate-500 mb-6">Selecteer bij welke bouwstenen deze bron hoort. Je kunt er meerdere selecteren.</p>
+              
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mb-6 max-h-[50vh] overflow-y-auto custom-scrollbar p-2">
+                {BOUWSTENEN.map(b => (
+                  <label key={b.id} className="flex items-start gap-3 p-3 border rounded-xl cursor-pointer hover:bg-slate-50 transition">
+                    <input 
+                      type="checkbox" 
+                      className="mt-1"
+                      checked={selectedCategories.includes(b.id)}
+                      onChange={(e) => {
+                        if (e.target.checked) {
+                          setSelectedCategories(prev => [...prev, b.id]);
+                        } else {
+                          setSelectedCategories(prev => prev.filter(id => id !== b.id));
+                        }
+                      }}
+                    />
+                    <div>
+                      <div className="font-bold text-sm text-[#003B5C]">Bouwsteen {b.id}</div>
+                      <div className="text-xs text-slate-500 line-clamp-1">{b.title}</div>
+                    </div>
+                  </label>
+                ))}
+              </div>
+
+              <div className="flex justify-end gap-3 pt-4 border-t border-slate-100">
+                <button onClick={() => { setShowEditCategoriesModal(false); setEditingDoc(null); }} className="px-4 py-2 text-slate-500 font-bold hover:bg-slate-100 rounded-lg">Annuleren</button>
+                <button 
+                  onClick={saveEditedCategories}
+                  disabled={selectedCategories.length === 0}
+                  className="px-4 py-2 bg-[#F37021] text-white font-bold rounded-lg hover:bg-[#d9611a] disabled:opacity-50"
+                >
+                  Wijzigingen Opslaan
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  };
+
   const ReaderView = () => (
     <div className="flex h-full bg-slate-50 overflow-hidden">
       <div className="flex-1 flex flex-col border-r border-slate-200 overflow-hidden bg-white relative">
         <div className="bg-white border-b border-slate-100 p-4 flex justify-between items-center z-10 px-6 shadow-sm">
           <button onClick={() => setView('library')} className="text-[#003B5C] hover:text-[#F37021] flex items-center gap-1 font-bold text-sm transition">
             <ChevronRight className="rotate-180" size={18} />
-            Terug naar overzicht
+            Terug
           </button>
           
           <div className="flex items-center gap-3">
@@ -822,7 +1184,7 @@ export default function App() {
             onHighlightClick={setActiveHighlightId}
           />
         ) : (
-          <ChatPanel selectedDoc={selectedDoc} />
+          <ChatPanel selectedDoc={selectedDoc} highlights={highlights} />
         )}
       </div>
     </div>
@@ -884,9 +1246,11 @@ export default function App() {
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
           {filteredHighlights.map(h => (
             <div key={h.id} className="bg-white border border-slate-200 rounded-xl p-6 shadow-sm flex flex-col hover:border-[#F37021] hover:shadow-md transition">
-              <div className="flex justify-between items-start mb-4 border-b border-slate-100 pb-4">
-                <span className="bg-[#F37021] text-white text-[10px] px-3 py-1 rounded-full uppercase font-black tracking-widest">{h.tag}</span>
-                <span className="text-slate-400 text-[10px] font-bold max-w-[150px] truncate" title={h.docTitle}>
+              <div className="flex flex-wrap gap-1 mb-4 border-b border-slate-100 pb-4">
+                {(h.tag || 'algemeen').split(',').map((t, idx) => (
+                  <span key={idx} className="bg-[#F37021] text-white text-[10px] px-3 py-1 rounded-full uppercase font-black tracking-widest">{t.trim()}</span>
+                ))}
+                <span className="text-slate-400 text-[10px] font-bold max-w-[150px] truncate ml-auto" title={h.docTitle}>
                    {h.docTitle}
                 </span>
               </div>
@@ -923,19 +1287,17 @@ export default function App() {
   return (
     <div className="flex h-screen bg-slate-50 text-slate-900 font-sans selection:bg-[#F37021]/30">
       <style dangerouslySetInnerHTML={{__html: `
-        .custom-scrollbar::-webkit-scrollbar { width: 6px; }
+        .custom-scrollbar::-webkit-scrollbar { width: 6px; height: 6px; }
         .custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
         .custom-scrollbar::-webkit-scrollbar-thumb { background-color: #cbd5e1; border-radius: 20px; }
       `}} />
 
-      {/* DYNAMISCHE ZIJBALK NAVIGATIE: klapt in (w-20) tijdens het lezen, anders w-64 */}
       <div className={`bg-[#003B5C] flex flex-col transition-all duration-300 ease-in-out z-20 shadow-2xl shrink-0 ${isReaderView ? 'w-20' : 'w-64'}`}>
         <div className={`py-8 mb-6 flex items-center bg-[#002b44] transition-all duration-300 ${isReaderView ? 'px-0 justify-center' : 'px-6 gap-4'}`}>
           <div className="bg-[#F37021] p-3 rounded-xl text-white shadow-lg shrink-0">
             <BookOpen size={28} strokeWidth={2.5} />
           </div>
           
-          {/* Tekst wordt onzichtbaar als de balk inklapt */}
           {!isReaderView && (
             <div className="text-white overflow-hidden whitespace-nowrap animate-in fade-in duration-300">
               <h1 className="font-black text-xl tracking-tight leading-none">WIJZE LESSEN</h1>
@@ -962,6 +1324,15 @@ export default function App() {
             <Tag size={22} className="shrink-0" />
             {!isReaderView && <span className="block text-sm whitespace-nowrap overflow-hidden">Annotaties</span>}
           </button>
+
+          <button 
+            onClick={() => { setView('bibliography'); setActiveHighlightId(null); }}
+            title="Bibliotheek"
+            className={`w-full flex items-center rounded-xl transition-all ${isReaderView ? 'justify-center p-4' : 'px-6 py-4 gap-4'} ${view === 'bibliography' ? 'bg-[#F37021] text-white shadow-md font-bold' : 'text-slate-300 hover:bg-white/10 hover:text-white'}`}
+          >
+            <Book size={22} className="shrink-0" />
+            {!isReaderView && <span className="block text-sm whitespace-nowrap overflow-hidden">Bibliotheek</span>}
+          </button>
         </nav>
 
         <div className={`mt-auto p-6 border-t border-white/10 bg-[#002b44] transition-all duration-300 ${isReaderView ? 'flex justify-center px-0' : ''}`}>
@@ -977,6 +1348,7 @@ export default function App() {
         {view === 'library' && <div className="h-full overflow-y-auto custom-scrollbar"><LibraryView /></div>}
         {view === 'reader' && <ReaderView />}
         {view === 'tags' && <TagExplorerView />}
+        {view === 'bibliography' && <BibliographyView />}
       </main>
     </div>
   );
